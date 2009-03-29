@@ -6,8 +6,30 @@ use warnings;
 use Moose ();
 use Moose::Exporter;
 use Catalyst ();
+use Carp qw/croak/;
 
-Moose::Exporter->setup_import_methods;
+Moose::Exporter->setup_import_methods( also => 'Moose' );
+
+our $CATALYST_COMPONENT_TYPE;
+{
+    # Butt ugly. Something smarter can be done to get the param, I'm sure..
+    my $importer = \&import;
+    my $import_wrapper = sub {
+        my $self = shift;
+        my $param = shift || 'Component';
+        croak("Unknown component '$param', must be one of /Model|View|Controller|Component")
+            unless ($param =~ /^Model|View|Controller|Component$/);
+        $CATALYST_COMPONENT_TYPE = $param;
+        unshift(@_, $self);
+        goto $importer;
+    };
+    {
+        no warnings 'redefine';
+        *import = $import_wrapper;
+    }
+}
+
+our $CATALYST_FIRST_MOOSE_COMPAT_RELEASE = 5.71001;
 
 sub init_meta {
   shift;
@@ -16,19 +38,21 @@ sub init_meta {
   my $meta = Moose->init_meta(%p);
   my $for_class = $p{for_class};
 
-  # FIXME - Is this compatible with the latest 5.71, should we test
-  #         for it and avoid this logic if so?
   if (! $for_class->isa('Catalyst::Component') ) {
-    $meta->superclasses('Catalyst::Component', $meta->superclasses);
+    $meta->superclasses('Catalyst::' . $CATALYST_COMPONENT_TYPE, $meta->superclasses);
   }
-  if ($Catalyst::VERSION < 5.8 && ! $for_class->isa('Moose::Object')) {
-    $meta->superclasses( 'Moose::Object', $meta->superclasses );
-    # FIXME - BUILDARGS instead, then make_immutable will not complain.
-    $meta->add_around_method_modifier(new => sub {
+  if ($Catalyst::VERSION < $CATALYST_FIRST_MOOSE_COMPAT_RELEASE) {
+    # FIXME - work with immutable components!
+    my @nomoose_superclasses = grep { ! /^Moose::Object$/ } $meta->superclasses;
+    $meta->superclasses( 'Moose::Object', @nomoose_superclasses );
+    $meta->add_around_method_modifier(BUILDARGS => sub {
       my $next = shift;
-      my ($self, $app) = @_;
-      my $arguments = ( ref( $_[-1] ) eq 'HASH' ) ? $_[-1] : {};
-      return $self->$next( $self->merge_config_hashes($self->config, $arguments) );
+      my ($self, $app) = (shift, shift);
+      my $arguments = $self->merge_config_hashes(
+        $self->config, $self->$next(@_)
+      );
+      $arguments->{_application} = $app;
+      return $arguments;
     });
   }
 
